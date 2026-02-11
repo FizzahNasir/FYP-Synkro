@@ -1,0 +1,162 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+*.manifest
+*.spec
+pip-log.txt
+pip-delete-this-directory.txt
+htmlcov/
+.tox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+.hypothesis/
+.pytest_cache/
+*.log
+
+# Virtual Environment
+venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+
+# Environment Variables
+.env
+.env.local
+.env.*.local
+*.env
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Database
+*.db
+*.sqlite
+*.sqlite3
+instance/
+
+# Alembic
+alembic/versions/*.pyc
+
+# Node.js / Next.js
+node_modules/
+.next/
+out/
+.npm
+.eslintcache
+.yarn/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Next.js build output
+.next/
+next-env.d.ts
+
+# Testing
+.coverage
+*.cover
+.nyc_output
+.jest/
+
+# Production
+/build
+/dist
+
+# Local storage (meeting recordings, etc.)
+backend/storage/
+backend/uploads/
+storage/
+uploads/
+
+# Whisper model cache
+~/.cache/whisper/
+
+# Temporary files
+*.tmp
+*.temp
+tmp/
+temp/
+
+# Audio/Video files (large files that shouldn't be in repo)
+*.mp3
+*.mp4
+*.wav
+*.m4a
+*.webm
+*.mpeg
+*.mpga
+*.avi
+*.mov
+
+# OS
+Thumbs.db
+.DS_Store
+desktop.ini
+
+# Logs
+logs/
+*.log
+
+# API Keys and Secrets (IMPORTANT!)
+**/*.pem
+**/*.key
+**/secrets.json
+**/credentials.json
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+
+# Redis dump
+dump.rdb
+
+# Celery
+celerybeat-schedule
+celerybeat.pid
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# pyenv
+.python-version
+
+# mypy
+.mypy_cache/
+.dmypy.json
+dmypy.json
