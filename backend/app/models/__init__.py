@@ -9,6 +9,7 @@ from app.models.meeting import Meeting, MeetingStatus
 from app.models.action_item import ActionItem, ActionItemStatus
 from app.models.integration import Integration, IntegrationPlatform
 from app.models.message import Message, MessageIntent
+from app.models.email import Email
 
 __all__ = [
     "Team",
@@ -27,4 +28,5 @@ __all__ = [
     "IntegrationPlatform",
     "Message",
     "MessageIntent",
+    "Email",
 ]

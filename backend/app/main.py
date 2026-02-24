@@ -9,7 +9,7 @@ from contextlib import asynccontextmanager
 
 from app.config import settings
 from app.database import init_db, close_db
-from app.routers import auth, tasks, meetings, chat, integrations, analytics
+from app.routers import auth, tasks, meetings, chat, integrations, analytics, emails
 
 # Lifespan context manager for startup and shutdown events
 @asynccontextmanager
@@ -22,36 +22,38 @@ async def lifespan(app: FastAPI):
     # Check critical configuration
     print("\n[*] Configuration Check:")
 
-    # OpenAI API Key (required for meeting transcription)
-    if settings.OPENAI_API_KEY:
-        print("    ✓ OpenAI API Key: Configured")
+    # AI API Keys (for meeting transcription + summarization)
+    if settings.GROQ_API_KEY:
+        print("    [OK] Groq API Key: Configured (FREE transcription + summarization)")
+    elif settings.OPENAI_API_KEY:
+        print("    [OK] OpenAI API Key: Configured (paid)")
     else:
-        print("    ✗ OpenAI API Key: MISSING")
+        print("    [X] No AI API Key configured!")
         print("      WARNING: Meeting transcription will not work!")
-        print("      Get your key at: https://platform.openai.com/api-keys")
+        print("      Get a FREE key at: https://console.groq.com/keys")
 
     # Storage configuration
     if settings.use_s3:
-        print("    ✓ Storage: AWS S3")
+        print("    [OK] Storage: AWS S3")
     elif settings.use_cloudinary:
-        print("    ✓ Storage: Cloudinary")
+        print("    [OK] Storage: Cloudinary")
     else:
-        print("    ⚠ Storage: Local filesystem (development only)")
+        print("    [!] Storage: Local filesystem (development only)")
 
     # Database
     db_type = "PostgreSQL" if "postgresql" in settings.DATABASE_URL else "SQLite"
-    print(f"    ✓ Database: {db_type}")
+    print(f"    [OK] Database: {db_type}")
 
     # Redis/Celery
     if settings.REDIS_URL:
-        print("    ✓ Redis: Configured")
+        print("    [OK] Redis: Configured")
     else:
-        print("    ✗ Redis: Not configured (background tasks disabled)")
+        print("    [X] Redis: Not configured (background tasks disabled)")
 
     print("")
 
-    # Initialize database (uncomment if you want to create tables on startup)
-    # await init_db()
+    # Initialize database - create tables on startup
+    await init_db()
 
     yield
 
@@ -90,6 +92,7 @@ app.include_router(meetings.router)
 app.include_router(chat.router)
 app.include_router(integrations.router)
 app.include_router(analytics.router)
+app.include_router(emails.router)
 
 # Root endpoint
 @app.get("/", tags=["Root"])
@@ -130,7 +133,7 @@ async def api_status():
         "features": {
             "authentication": True,
             "task_management": True,
-            "meeting_transcription": bool(settings.OPENAI_API_KEY),
+            "meeting_transcription": bool(settings.GROQ_API_KEY or settings.OPENAI_API_KEY),
             "file_storage": settings.use_s3 or settings.use_cloudinary,
             "integrations": {
                 "gmail": bool(settings.GOOGLE_CLIENT_ID),

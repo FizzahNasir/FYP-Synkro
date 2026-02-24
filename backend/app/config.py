@@ -35,6 +35,9 @@ class Settings(BaseSettings):
     # OpenAI
     OPENAI_API_KEY: str = ""
 
+    # Groq (FREE alternative - get key at https://console.groq.com/keys)
+    GROQ_API_KEY: str = ""
+
     # AWS S3
     AWS_ACCESS_KEY_ID: str = ""
     AWS_SECRET_ACCESS_KEY: str = ""
@@ -49,7 +52,11 @@ class Settings(BaseSettings):
     # CORS
     ALLOWED_ORIGINS: str | List[str] = '["http://localhost:3000"]'
 
-    # Google OAuth
+    # Gmail IMAP (simple App Password method)
+    GMAIL_EMAIL: str = ""
+    GMAIL_APP_PASSWORD: str = ""
+
+    # Google OAuth (optional alternative)
     GOOGLE_CLIENT_ID: str = ""
     GOOGLE_CLIENT_SECRET: str = ""
     GOOGLE_REDIRECT_URI: str = ""
@@ -85,7 +92,7 @@ class Settings(BaseSettings):
     @property
     def database_url_sync(self) -> str:
         """Get sync database URL for Alembic"""
-        return self.DATABASE_URL.replace("+asyncpg", "")
+        return self.DATABASE_URL.replace("+asyncpg", "").replace("+aiosqlite", "")
 
     @property
     def use_s3(self) -> bool:

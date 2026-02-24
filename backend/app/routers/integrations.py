@@ -1,15 +1,17 @@
-"""Integration endpoints - Gmail, Slack OAuth flows and sync"""
-from fastapi import APIRouter, Depends, HTTPException, status, Query
-from fastapi.responses import RedirectResponse
+"""Integration endpoints - Gmail IMAP connection and sync"""
+from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, and_
-from typing import List, Optional
+from typing import List
 from datetime import datetime
+import logging
 
 from app.database import get_db
 from app.models import User, Integration, IntegrationPlatform
 from app.dependencies import get_current_user
 from app.config import settings
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/integrations", tags=["Integrations"])
 
@@ -30,99 +32,122 @@ async def get_integrations(
             "id": i.id,
             "platform": i.platform.value,
             "is_active": i.is_active,
-            "last_synced_at": i.last_synced_at.isoformat() if i.last_synced_at else None,
-            "created_at": i.created_at.isoformat(),
-            "metadata": i.metadata or {},
+            "last_synced_at": i.last_synced_at.isoformat() + "Z" if i.last_synced_at else None,
+            "created_at": i.created_at.isoformat() + "Z",
+            "metadata": i.platform_metadata or {},
         }
         for i in integrations
     ]
 
 
-@router.get("/oauth/gmail/authorize")
-async def gmail_authorize(current_user: User = Depends(get_current_user)):
-    """
-    Generate Google OAuth authorization URL.
-    Redirect user to Google to grant access.
-    """
-    if not settings.GOOGLE_CLIENT_ID:
-        raise HTTPException(
-            status_code=status.HTTP_501_NOT_IMPLEMENTED,
-            detail="Gmail integration not configured"
-        )
-
-    scopes = "openid email profile https://www.googleapis.com/auth/gmail.readonly"
-    auth_url = (
-        f"https://accounts.google.com/o/oauth2/v2/auth?"
-        f"client_id={settings.GOOGLE_CLIENT_ID}"
-        f"&redirect_uri={settings.GOOGLE_REDIRECT_URI}"
-        f"&response_type=code"
-        f"&scope={scopes}"
-        f"&access_type=offline"
-        f"&prompt=consent"
-        f"&state={current_user.id}"
-    )
-    return {"authorization_url": auth_url}
-
-
-@router.get("/oauth/gmail/callback")
-async def gmail_callback(
-    code: str,
-    state: str,
+@router.post("/gmail/connect")
+async def connect_gmail(
+    current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db)
 ):
     """
-    Handle Google OAuth callback.
-    Exchange code for tokens and store them.
+    Connect Gmail using IMAP with App Password from .env config.
+    No Google Cloud Console or OAuth needed.
     """
-    import httpx
+    from app.services.gmail_service import test_connection
 
-    # Exchange code for tokens
-    try:
-        async with httpx.AsyncClient() as client:
-            token_response = await client.post(
-                "https://oauth2.googleapis.com/token",
-                data={
-                    "client_id": settings.GOOGLE_CLIENT_ID,
-                    "client_secret": settings.GOOGLE_CLIENT_SECRET,
-                    "code": code,
-                    "grant_type": "authorization_code",
-                    "redirect_uri": settings.GOOGLE_REDIRECT_URI,
-                },
+    if not settings.GMAIL_EMAIL or not settings.GMAIL_APP_PASSWORD:
+        raise HTTPException(
+            status_code=status.HTTP_501_NOT_IMPLEMENTED,
+            detail="Gmail not configured. Set GMAIL_EMAIL and GMAIL_APP_PASSWORD in .env"
+        )
+
+    # Test the connection
+    result = test_connection(settings.GMAIL_EMAIL, settings.GMAIL_APP_PASSWORD)
+
+    if not result["success"]:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=result["error"]
+        )
+
+    # Check if integration already exists
+    existing = await db.execute(
+        select(Integration).where(
+            and_(
+                Integration.user_id == current_user.id,
+                Integration.platform == IntegrationPlatform.GMAIL,
             )
-            token_data = token_response.json()
+        )
+    )
+    integration = existing.scalar_one_or_none()
 
-        if "error" in token_data:
-            raise HTTPException(status_code=400, detail=token_data["error_description"])
-
-        # Get user profile
-        async with httpx.AsyncClient() as client:
-            profile_response = await client.get(
-                "https://www.googleapis.com/oauth2/v2/userinfo",
-                headers={"Authorization": f"Bearer {token_data['access_token']}"},
-            )
-            profile_data = profile_response.json()
-
-        # Store integration
+    if integration:
+        # Update existing
+        integration.access_token = settings.GMAIL_APP_PASSWORD
+        integration.is_active = True
+        integration.platform_metadata = {"email": settings.GMAIL_EMAIL}
+    else:
+        # Create new
         integration = Integration(
-            user_id=state,  # state contains user_id
+            user_id=current_user.id,
             platform=IntegrationPlatform.GMAIL,
-            access_token=token_data["access_token"],
-            refresh_token=token_data.get("refresh_token"),
-            expires_at=datetime.utcnow(),
-            scope=token_data.get("scope"),
+            access_token=settings.GMAIL_APP_PASSWORD,
             is_active=True,
-            metadata={"email": profile_data.get("email"), "name": profile_data.get("name")},
+            platform_metadata={"email": settings.GMAIL_EMAIL},
         )
         db.add(integration)
+
+    await db.commit()
+
+    logger.info(f"Gmail connected for user {current_user.id} ({settings.GMAIL_EMAIL})")
+
+    return {
+        "message": "Gmail connected successfully!",
+        "email": settings.GMAIL_EMAIL,
+    }
+
+
+@router.get("/gmail/emails")
+async def get_gmail_emails(
+    limit: int = 20,
+    days: int = 7,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db)
+):
+    """Fetch recent emails from connected Gmail account."""
+    from app.services.gmail_service import fetch_emails
+
+    # Verify integration exists
+    result = await db.execute(
+        select(Integration).where(
+            and_(
+                Integration.user_id == current_user.id,
+                Integration.platform == IntegrationPlatform.GMAIL,
+                Integration.is_active == True,
+            )
+        )
+    )
+    integration = result.scalar_one_or_none()
+
+    if not integration:
+        raise HTTPException(status_code=404, detail="Gmail not connected. Go to Settings to connect.")
+
+    email_addr = integration.platform_metadata.get("email") or settings.GMAIL_EMAIL
+    app_password = integration.access_token
+
+    try:
+        emails = fetch_emails(
+            email_addr=email_addr,
+            app_password=app_password,
+            limit=min(limit, 50),
+            since_days=min(days, 30),
+        )
+
+        # Update last synced
+        integration.last_synced_at = datetime.utcnow()
         await db.commit()
 
-        # Redirect back to frontend
-        return RedirectResponse(url="http://localhost:3000/dashboard/settings?integration=gmail&status=success")
+        return {"emails": emails, "count": len(emails)}
 
-    except HTTPException:
-        raise
     except Exception as e:
-        return RedirectResponse(url=f"http://localhost:3000/dashboard/settings?integration=gmail&status=error&message={str(e)}")
+        logger.error(f"Failed to fetch emails: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to fetch emails: {str(e)}")
 
 
 @router.post("/{integration_id}/sync")
@@ -148,7 +173,6 @@ async def sync_integration(
     if not integration.is_active:
         raise HTTPException(status_code=400, detail="Integration is not active")
 
-    # Update last synced timestamp
     integration.last_synced_at = datetime.utcnow()
     await db.commit()
 

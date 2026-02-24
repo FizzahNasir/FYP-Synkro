@@ -7,7 +7,7 @@ import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
-import { Upload, Video, FileAudio, X, Trash2 } from 'lucide-react'
+import { Upload, Video, FileAudio, X, Trash2, RotateCcw } from 'lucide-react'
 import { formatDateTime, formatRelativeTime, getStatusColor, formatFileSize } from '@/lib/utils'
 import type { Meeting } from '@/types'
 import Link from 'next/link'
@@ -48,6 +48,20 @@ export default function MeetingsPage() {
       queryClient.invalidateQueries({ queryKey: ['meetings'] })
     },
   })
+
+  // Retry mutation
+  const retryMutation = useMutation({
+    mutationFn: (meetingId: string) => meetingApi.retryMeeting(meetingId),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['meetings'] })
+    },
+  })
+
+  const handleRetry = (e: React.MouseEvent, meetingId: string) => {
+    e.preventDefault()
+    e.stopPropagation()
+    retryMutation.mutate(meetingId)
+  }
 
   const handleDelete = (e: React.MouseEvent, meetingId: string, meetingTitle: string) => {
     e.preventDefault() // Prevent Link navigation
@@ -226,13 +240,13 @@ export default function MeetingsPage() {
                           </p>
                         )}
 
-                        {meeting.status === 'processing' && (
+                        {(meeting.status === 'processing' || meeting.status === 'transcribed') && (
                           <div className="mt-2">
                             <div className="h-1 bg-gray-200 rounded-full overflow-hidden">
                               <div className="h-full bg-primary animate-pulse w-2/3" />
                             </div>
                             <p className="text-xs text-muted-foreground mt-1">
-                              Transcribing...
+                              {meeting.status === 'processing' ? 'Transcribing audio...' : 'Generating summary and action items...'}
                             </p>
                           </div>
                         )}
@@ -241,16 +255,28 @@ export default function MeetingsPage() {
                   </Card>
                 </Link>
 
-                {/* Delete button */}
-                <Button
-                  variant="destructive"
-                  size="sm"
-                  className="absolute top-2 right-2 opacity-0 group-hover:opacity-100 transition-opacity"
-                  onClick={(e) => handleDelete(e, meeting.id, meeting.title)}
-                  disabled={deleteMutation.isPending}
-                >
-                  <Trash2 className="h-4 w-4" />
-                </Button>
+                {/* Action buttons */}
+                <div className="absolute top-2 right-2 flex gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                  {meeting.status === 'failed' && (
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={(e) => handleRetry(e, meeting.id)}
+                      disabled={retryMutation.isPending}
+                      title="Retry transcription"
+                    >
+                      <RotateCcw className="h-4 w-4" />
+                    </Button>
+                  )}
+                  <Button
+                    variant="destructive"
+                    size="sm"
+                    onClick={(e) => handleDelete(e, meeting.id, meeting.title)}
+                    disabled={deleteMutation.isPending}
+                  >
+                    <Trash2 className="h-4 w-4" />
+                  </Button>
+                </div>
               </div>
             ))}
           </div>

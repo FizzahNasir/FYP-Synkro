@@ -32,10 +32,8 @@ httpx==0.26.0
 # AI/ML
 openai==1.10.0
 
-# FREE Local Whisper Transcription (no API key needed!)
-openai-whisper==20231117
-torch==2.1.2
-torchaudio==2.1.2
+# Local Whisper removed - using Groq API (free) for transcription
+# ffmpeg-python kept for potential audio processing
 ffmpeg-python==0.2.0
 
 # AWS S3

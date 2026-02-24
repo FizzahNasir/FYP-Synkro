@@ -7,7 +7,6 @@ from typing import List, Optional
 from datetime import datetime
 import tempfile
 import os
-import asyncio
 import logging
 
 from app.database import get_db
@@ -28,27 +27,21 @@ MAX_FILE_SIZE = 100 * 1024 * 1024  # 100MB for local processing
 
 async def process_meeting_background(meeting_id: str):
     """
-    Background task to transcribe and summarize meeting using FREE local Whisper.
-    This runs in the background without blocking the API response.
+    Background task to transcribe and summarize meeting using OpenAI Whisper API.
+    This runs as an async background task within FastAPI's event loop.
     """
-    from app.services.whisper_local import transcribe_audio_local
-    from app.services.ai_service import summarize_meeting, extract_action_items_from_summary
-    from app.database import async_session
-    from sqlalchemy.engine import create_engine
-    from sqlalchemy.orm import Session
-    from app.config import settings
+    from app.services.ai_service import transcribe_meeting, summarize_meeting
+    from app.database import AsyncSessionLocal
 
     tmp_file_path = None
 
     try:
         logger.info(f"[Meeting {meeting_id}] Starting background processing")
 
-        # Use sync session for background task
-        sync_engine = create_engine(settings.database_url_sync, pool_pre_ping=True)
-
-        with Session(sync_engine) as db:
+        async with AsyncSessionLocal() as db:
             # Get meeting
-            meeting = db.execute(select(Meeting).where(Meeting.id == meeting_id)).scalar_one_or_none()
+            result = await db.execute(select(Meeting).where(Meeting.id == meeting_id))
+            meeting = result.scalar_one_or_none()
 
             if not meeting:
                 logger.error(f"[Meeting {meeting_id}] Not found")
@@ -57,7 +50,7 @@ async def process_meeting_background(meeting_id: str):
             if not meeting.recording_url:
                 logger.error(f"[Meeting {meeting_id}] No recording URL")
                 meeting.status = MeetingStatus.FAILED
-                db.commit()
+                await db.commit()
                 return
 
             # Download audio file
@@ -81,25 +74,21 @@ async def process_meeting_background(meeting_id: str):
 
             logger.info(f"[Meeting {meeting_id}] Downloading to {tmp_file_path}")
 
-            # Download file (run async operation in sync context)
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            loop.run_until_complete(storage.download_file(key, tmp_file_path))
-            loop.close()
+            # Download file
+            await storage.download_file(key, tmp_file_path)
 
             # Check file size
             file_size_mb = os.path.getsize(tmp_file_path) / (1024 * 1024)
             logger.info(f"[Meeting {meeting_id}] File size: {file_size_mb:.2f}MB")
 
-            # Transcribe using FREE local Whisper
-            logger.info(f"[Meeting {meeting_id}] Starting FREE local transcription (this may take a few minutes...)")
+            # Transcribe using OpenAI Whisper API
+            logger.info(f"[Meeting {meeting_id}] Starting transcription via OpenAI Whisper API...")
+            transcript = await transcribe_meeting(tmp_file_path)
 
-            result = transcribe_audio_local(tmp_file_path, model_size="base")
+            # Calculate duration from audio file (rough estimation from file size)
+            duration_minutes = max(1, int(file_size_mb * 2))
 
-            transcript = result["transcript"]
-            duration_minutes = result["duration_minutes"]
-
-            logger.info(f"[Meeting {meeting_id}] Transcription complete! {len(transcript)} chars, {duration_minutes} min")
+            logger.info(f"[Meeting {meeting_id}] Transcription complete! {len(transcript)} chars, ~{duration_minutes} min")
 
             # Clean up temp file
             os.unlink(tmp_file_path)
@@ -109,19 +98,12 @@ async def process_meeting_background(meeting_id: str):
             meeting.transcript = transcript
             meeting.duration_minutes = duration_minutes
             meeting.status = MeetingStatus.TRANSCRIBED
-            db.commit()
+            await db.commit()
 
             logger.info(f"[Meeting {meeting_id}] Transcript saved, starting summarization")
 
-            # Summarize (use async AI service)
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-
-            summary_data = loop.run_until_complete(
-                summarize_meeting(transcript, meeting.title)
-            )
-
-            loop.close()
+            # Summarize
+            summary_data = await summarize_meeting(transcript, meeting.title)
 
             # Save summary
             meeting.summary = summary_data["summary"]
@@ -145,7 +127,7 @@ async def process_meeting_background(meeting_id: str):
                     created_count += 1
 
             meeting.status = MeetingStatus.COMPLETED
-            db.commit()
+            await db.commit()
 
             logger.info(f"[Meeting {meeting_id}] Processing complete! {created_count} action items created")
 
@@ -154,12 +136,13 @@ async def process_meeting_background(meeting_id: str):
 
         # Mark as failed
         try:
-            sync_engine = create_engine(settings.database_url_sync, pool_pre_ping=True)
-            with Session(sync_engine) as db:
-                meeting = db.execute(select(Meeting).where(Meeting.id == meeting_id)).scalar_one_or_none()
+            from app.database import AsyncSessionLocal as FailSessionLocal
+            async with FailSessionLocal() as db:
+                result = await db.execute(select(Meeting).where(Meeting.id == meeting_id))
+                meeting = result.scalar_one_or_none()
                 if meeting:
                     meeting.status = MeetingStatus.FAILED
-                    db.commit()
+                    await db.commit()
         except Exception as db_err:
             logger.error(f"[Meeting {meeting_id}] Failed to update status: {str(db_err)}")
 
@@ -252,15 +235,15 @@ async def upload_meeting(
         await db.commit()
         await db.refresh(new_meeting)
 
-        # Trigger FREE local transcription in background
-        logger.info(f"Scheduling FREE local transcription for meeting {new_meeting.id}")
+        # Trigger transcription in background using OpenAI Whisper API
+        logger.info(f"Scheduling transcription for meeting {new_meeting.id}")
         background_tasks.add_task(process_meeting_background, new_meeting.id)
 
         return {
             "id": new_meeting.id,
             "title": new_meeting.title,
             "status": new_meeting.status.value,
-            "message": "Meeting uploaded successfully! FREE transcription starting (may take a few minutes)..."
+            "message": "Meeting uploaded successfully! Transcription starting..."
         }
 
     except Exception as e:
@@ -458,6 +441,58 @@ async def delete_meeting(
     await db.commit()
 
     return None
+
+
+@router.post("/{meeting_id}/retry", status_code=status.HTTP_200_OK)
+async def retry_meeting_transcription(
+    meeting_id: str,
+    background_tasks: BackgroundTasks,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    Retry transcription for a failed or stuck meeting.
+    Resets status to PROCESSING and re-queues background job.
+    """
+    result = await db.execute(
+        select(Meeting).where(
+            and_(
+                Meeting.id == meeting_id,
+                Meeting.team_id == current_user.team_id
+            )
+        )
+    )
+    meeting = result.scalar_one_or_none()
+
+    if not meeting:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Meeting not found"
+        )
+
+    if meeting.status not in (MeetingStatus.FAILED, MeetingStatus.PROCESSING):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Only failed or stuck meetings can be retried"
+        )
+
+    if not meeting.recording_url:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="No recording file found for this meeting"
+        )
+
+    # Reset status
+    meeting.status = MeetingStatus.PROCESSING
+    meeting.transcript = None
+    meeting.summary = None
+    await db.commit()
+
+    # Re-queue background task
+    logger.info(f"Retrying transcription for meeting {meeting.id}")
+    background_tasks.add_task(process_meeting_background, meeting.id)
+
+    return {"id": meeting.id, "status": "processing", "message": "Transcription retry started"}
 
 
 @router.post("/{meeting_id}/action-items/{action_item_id}/convert", status_code=status.HTTP_201_CREATED)

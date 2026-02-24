@@ -19,6 +19,7 @@ import {
   AlertCircle,
   Mic,
   Sparkles,
+  RotateCcw,
 } from 'lucide-react'
 
 const statusConfig: Record<string, { label: string; variant: 'default' | 'secondary' | 'destructive' | 'outline' }> = {
@@ -60,6 +61,13 @@ export default function MeetingDetailPage() {
   const rejectMutation = useMutation({
     mutationFn: (actionItemId: string) =>
       meetingApi.rejectActionItem(meetingId, actionItemId),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['meeting', meetingId] })
+    },
+  })
+
+  const retryMutation = useMutation({
+    mutationFn: () => meetingApi.retryMeeting(meetingId),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['meeting', meetingId] })
     },
@@ -118,16 +126,51 @@ export default function MeetingDetailPage() {
       </div>
 
       {/* Processing indicator */}
-      {meeting.status === 'processing' && (
+      {(meeting.status === 'processing' || meeting.status === 'transcribed') && (
         <Card className="border-blue-200 bg-blue-50">
           <CardContent className="flex items-center gap-3 py-4">
             <Loader2 className="h-5 w-5 animate-spin text-blue-600" />
             <div>
-              <p className="font-medium text-blue-900">Processing your meeting...</p>
+              <p className="font-medium text-blue-900">
+                {meeting.status === 'processing' ? 'Transcribing audio...' : 'Generating summary...'}
+              </p>
               <p className="text-sm text-blue-700">
-                AI is transcribing and analyzing the recording. This may take a few minutes.
+                {meeting.status === 'processing'
+                  ? 'Converting speech to text. This usually takes a few minutes depending on recording length.'
+                  : 'AI is analyzing the transcript and extracting action items. Almost done!'}
               </p>
             </div>
+          </CardContent>
+        </Card>
+      )}
+
+      {/* Failed indicator with retry */}
+      {meeting.status === 'failed' && (
+        <Card className="border-red-200 bg-red-50">
+          <CardContent className="flex items-center justify-between gap-3 py-4">
+            <div className="flex items-center gap-3">
+              <AlertCircle className="h-5 w-5 text-red-600" />
+              <div>
+                <p className="font-medium text-red-900">Transcription failed</p>
+                <p className="text-sm text-red-700">
+                  Something went wrong during processing. You can retry the transcription.
+                </p>
+              </div>
+            </div>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => retryMutation.mutate()}
+              disabled={retryMutation.isPending}
+              className="shrink-0"
+            >
+              {retryMutation.isPending ? (
+                <Loader2 className="h-4 w-4 animate-spin mr-1" />
+              ) : (
+                <RotateCcw className="h-4 w-4 mr-1" />
+              )}
+              Retry
+            </Button>
           </CardContent>
         </Card>
       )}

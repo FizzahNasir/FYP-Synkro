@@ -34,7 +34,7 @@ export default function LoginPage() {
         <CardHeader className="space-y-1">
           <CardTitle className="text-3xl font-bold text-center">Synkro</CardTitle>
           <CardDescription className="text-center">
-            AI-Powered Workspace Orchestration
+            AI-Powered Workspace
           </CardDescription>
         </CardHeader>
         <form onSubmit={handleSubmit}>

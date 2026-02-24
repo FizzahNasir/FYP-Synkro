@@ -1,5 +1,5 @@
 """Pydantic schemas for Meeting model"""
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_serializer
 from datetime import datetime
 from typing import Optional, List
 
@@ -21,6 +21,13 @@ class ActionItemResponse(ActionItemBase):
     created_at: datetime
 
     model_config = {"from_attributes": True}
+
+    @field_serializer('created_at', 'deadline_mentioned')
+    def serialize_datetime(self, dt: Optional[datetime], _info):
+        """Serialize datetime to ISO format with UTC timezone"""
+        if dt is None:
+            return None
+        return dt.isoformat() + 'Z' if not dt.isoformat().endswith('Z') else dt.isoformat()
 
 
 class MeetingBase(BaseModel):
@@ -56,6 +63,14 @@ class MeetingResponse(MeetingBase):
     action_items: List[ActionItemResponse] = []
 
     model_config = {"from_attributes": True}
+
+    @field_serializer('created_at', 'updated_at', 'scheduled_at')
+    def serialize_datetime(self, dt: Optional[datetime], _info):
+        """Serialize datetime to ISO format with UTC timezone"""
+        if dt is None:
+            return None
+        # Ensure it's treated as UTC and format with Z suffix
+        return dt.isoformat() + 'Z' if not dt.isoformat().endswith('Z') else dt.isoformat()
 
 
 class MeetingUploadResponse(BaseModel):
