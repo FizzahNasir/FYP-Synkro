@@ -1,0 +1,30 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(node --version:*)",
+      "Bash(npm --version:*)",
+      "Bash(python3:*)",
+      "Bash(venv/bin/pip install:*)",
+      "Bash(npm install)",
+      "Bash(venv/bin/python:*)",
+      "Bash(venv/bin/alembic upgrade:*)",
+      "Bash(pg_isready:*)",
+      "Bash(brew services:*)",
+      "Read(//Applications/**)",
+      "Bash(psql:*)",
+      "Bash(PSQL=\"/Applications/Postgres.app/Contents/Versions/latest/bin/psql\")",
+      "Bash(\"$PSQL\" postgres -c \"CREATE USER synkro WITH PASSWORD ''synkro123'';\")",
+      "Bash(\"$PSQL\" postgres -c \"CREATE DATABASE synkro OWNER synkro;\")",
+      "Bash(\"$PSQL\" postgres -c \"GRANT ALL PRIVILEGES ON DATABASE synkro TO synkro;\")",
+      "Bash(npx tsc:*)",
+      "Bash(source:*)",
+      "Bash(python migrate_db.py:*)",
+      "Bash(python -c:*)",
+      "Bash(lsof:*)",
+      "Bash(curl:*)"
+    ],
+    "additionalDirectories": [
+      "/Users/mac/Desktop/fyp synkro/backend"
+    ]
+  }
+}
