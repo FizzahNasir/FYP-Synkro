@@ -10,6 +10,7 @@ import logging
 
 from app.database import get_db
 from app.models import User, Email, Integration, IntegrationPlatform
+from app.models.task import Task, TaskStatus, TaskPriority, TaskSourceType
 from app.dependencies import get_current_user
 
 logger = logging.getLogger(__name__)
@@ -58,7 +59,12 @@ async def sync_emails(
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to fetch emails: {str(e)}")
 
+    from app.services.ai_service import extract_task_from_email
+
     new_count = 0
+    tasks_created = 0
+    new_email_ids: list[tuple[str, dict]] = []  # (email_db_id, raw_email)
+
     for raw in raw_emails:
         # Normalize Message-ID: strip any whitespace/newlines from header folding
         msg_id = (raw.get("gmail_message_id", "") or "").strip()
@@ -76,9 +82,11 @@ async def sync_emails(
             except Exception:
                 received_at = None
 
+        email_db_id = str(uuid.uuid4())
+
         # Use INSERT ... ON CONFLICT DO NOTHING so duplicate syncs never raise errors
         stmt = pg_insert(Email).values(
-            id=str(uuid.uuid4()),
+            id=email_db_id,
             gmail_message_id=msg_id,
             subject=raw.get("subject", "")[:1000],
             sender=raw.get("sender", "")[:500],
@@ -98,17 +106,67 @@ async def sync_emails(
         result = await db.execute(stmt)
         if result.rowcount > 0:
             new_count += 1
+            new_email_ids.append((email_db_id, raw))
 
     # Update last synced
     integration.last_synced_at = datetime.utcnow()
     await db.commit()
 
-    logger.info(f"Synced {new_count} new emails for user {current_user.id}")
+    # Auto-extract tasks from newly synced emails using AI
+    for email_db_id, raw in new_email_ids:
+        try:
+            task_info = await extract_task_from_email(
+                subject=raw.get("subject", ""),
+                sender=raw.get("sender", ""),
+                body=raw.get("body", ""),
+            )
+            if task_info.get("has_task"):
+                priority_map = {
+                    "low": TaskPriority.LOW,
+                    "medium": TaskPriority.MEDIUM,
+                    "high": TaskPriority.HIGH,
+                    "urgent": TaskPriority.URGENT,
+                }
+                priority = priority_map.get(
+                    (task_info.get("priority") or "medium").lower(), TaskPriority.MEDIUM
+                )
+
+                due_date = None
+                raw_due = task_info.get("due_date")
+                if raw_due:
+                    try:
+                        due_date = datetime.strptime(raw_due, "%Y-%m-%d")
+                    except Exception:
+                        due_date = None
+
+                new_task = Task(
+                    title=(task_info.get("title") or raw.get("subject", "Task from email"))[:500],
+                    description=task_info.get("description") or f"Extracted from email: {raw.get('subject', '')}",
+                    status=TaskStatus.TODO,
+                    priority=priority,
+                    due_date=due_date,
+                    assignee_id=current_user.id,
+                    created_by_id=current_user.id,
+                    team_id=current_user.team_id,
+                    source_type=TaskSourceType.AI,
+                    source_id=email_db_id,
+                )
+                db.add(new_task)
+                tasks_created += 1
+        except Exception as e:
+            logger.warning(f"Failed to extract task from email {email_db_id}: {e}")
+            continue
+
+    if tasks_created:
+        await db.commit()
+
+    logger.info(f"Synced {new_count} new emails, auto-created {tasks_created} tasks for user {current_user.id}")
 
     return {
-        "message": f"Synced {new_count} new emails",
+        "message": f"Synced {new_count} new emails" + (f", created {tasks_created} task(s) from email content" if tasks_created else ""),
         "new_count": new_count,
         "total_fetched": len(raw_emails),
+        "tasks_created": tasks_created,
     }
 
 
@@ -261,6 +319,54 @@ async def seed_demo_emails(
 
     await db.commit()
     return {"message": f"Created {count} demo emails", "count": count}
+
+
+@router.delete("/{email_id}")
+async def delete_email(
+    email_id: str,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db)
+):
+    """Delete an email from the database and from Gmail."""
+    result = await db.execute(
+        select(Email).where(
+            and_(Email.id == email_id, Email.user_id == current_user.id)
+        )
+    )
+    email_record = result.scalar_one_or_none()
+
+    if not email_record:
+        raise HTTPException(status_code=404, detail="Email not found")
+
+    gmail_deleted = False
+
+    # Only attempt Gmail deletion for real (non-demo) emails
+    if email_record.gmail_message_id and not email_record.gmail_message_id.startswith("demo-"):
+        # Get Gmail integration credentials
+        integ_result = await db.execute(
+            select(Integration).where(
+                and_(
+                    Integration.user_id == current_user.id,
+                    Integration.platform == IntegrationPlatform.GMAIL,
+                    Integration.is_active == True,
+                )
+            )
+        )
+        integration = integ_result.scalar_one_or_none()
+
+        if integration:
+            from app.services.gmail_service import delete_email_from_gmail
+            email_addr = integration.platform_metadata.get("email", "")
+            app_password = integration.access_token
+            try:
+                gmail_deleted = delete_email_from_gmail(email_addr, app_password, email_record.gmail_message_id)
+            except Exception as e:
+                logger.warning(f"Could not delete email from Gmail: {e}")
+
+    await db.delete(email_record)
+    await db.commit()
+
+    return {"message": "Email deleted", "gmail_deleted": gmail_deleted}
 
 
 @router.get("/{email_id}")

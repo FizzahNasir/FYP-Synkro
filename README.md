@@ -236,7 +236,7 @@ uvicorn app.main:app --reload
 # Frontend
 cd frontend
 npm install
-npm run dev
+
 ```
 
 Environment variables needed in `backend/.env`:

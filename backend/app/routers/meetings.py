@@ -131,11 +131,13 @@ async def process_meeting_background(meeting_id: str):
 
             # ── Context analysis ──────────────────────────────────────
             speakers = []
+            enriched_action_items = []
             if diarized_segments:
                 try:
                     analysis_result = await analyze_meeting_context(diarized_segments, meeting.title)
-                    enriched_segs = analysis_result.get("segments", diarized_segments)
+                    enriched_segs = analysis_result.get("enriched_segments", diarized_segments)
                     speakers = analysis_result.get("speakers", [])
+                    enriched_action_items = analysis_result.get("action_items", [])
                     meeting.diarized_transcript = _json.dumps(enriched_segs)
                     await db.commit()
                     logger.info(f"[Meeting {meeting_id}] Context analysis done — {len(speakers)} speakers")
@@ -148,6 +150,7 @@ async def process_meeting_background(meeting_id: str):
                 if diarized_segments and speakers:
                     summary_data = await generate_speaker_aware_summary(
                         diarized_transcript=meeting.transcript,
+                        enriched_action_items=enriched_action_items,
                         meeting_title=meeting.title,
                         speakers=speakers,
                     )
@@ -542,11 +545,13 @@ async def update_speaker_names(
 ):
     """
     Persist custom display names for speakers in a meeting.
+    Also auto-assigns pending action items to matched team members.
 
     Accepts a mapping of generic labels to human names:
     {"Speaker A": "Alice", "Speaker B": "Bob"}
     """
     import json
+    from app.models import Task, TaskStatus, TaskPriority, TaskSourceType
 
     result = await db.execute(
         select(Meeting).where(
@@ -565,11 +570,225 @@ async def update_speaker_names(
         )
 
     meeting.speaker_names = json.dumps(body.speaker_names)
+
+    # Build reverse lookup: display name → speaker label
+    name_to_speaker = {v.strip().lower(): k for k, v in body.speaker_names.items() if v.strip()}
+
+    # Auto-assign pending action items when the mentioned name matches a mapped speaker's real name
+    pending_items = [ai for ai in meeting.action_items if ai.status.value == "pending"]
+    auto_created_task_ids: list[str] = []
+    for action_item in pending_items:
+        candidate_name = None
+
+        # Check if assignee_mentioned matches any display name
+        if action_item.assignee_mentioned:
+            candidate_name = action_item.assignee_mentioned.strip().lower()
+
+        # Fallback: check if speaker_label maps to a display name
+        if not candidate_name and action_item.speaker_label:
+            mapped = body.speaker_names.get(action_item.speaker_label, "")
+            if mapped.strip():
+                candidate_name = mapped.strip().lower()
+
+        if not candidate_name:
+            continue
+
+        # Find team member whose name matches
+        user_result = await db.execute(
+            select(User).where(
+                and_(
+                    User.team_id == current_user.team_id,
+                    or_(
+                        User.full_name.ilike(f"%{candidate_name}%"),
+                        User.email.ilike(f"%{candidate_name}%")
+                    )
+                )
+            )
+        )
+        assignee = user_result.scalar_one_or_none()
+        if not assignee:
+            continue
+
+        # Auto-create a task assigned to this person
+        new_task = Task(
+            title=action_item.description[:500],
+            description=action_item.description,
+            status=TaskStatus.TODO,
+            priority=TaskPriority.MEDIUM,
+            due_date=action_item.deadline_mentioned,
+            team_id=current_user.team_id,
+            created_by_id=current_user.id,
+            assignee_id=assignee.id,
+            source_type=TaskSourceType.MEETING,
+            source_id=meeting_id,
+        )
+        db.add(new_task)
+        await db.flush()  # get new_task.id
+
+        action_item.status = "converted"
+        action_item.task_id = new_task.id
+        auto_created_task_ids.append(str(new_task.id))
+
     await db.commit()
+
+    # Fire Slack notifications for newly auto-assigned tasks (best-effort)
+    if auto_created_task_ids:
+        try:
+            from app.tasks.integration_tasks import notify_slack_task_created
+            for task_id in auto_created_task_ids:
+                notify_slack_task_created.delay(task_id, str(current_user.id))
+        except Exception:
+            pass
+
     await db.refresh(meeting)
     await db.refresh(meeting, ["action_items"])
 
     return meeting
+
+
+@router.get("/{meeting_id}/pending-assignments")
+async def get_pending_assignments(
+    meeting_id: str,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    Return pending action items for a meeting with speaker name suggestions
+    so the frontend can present an assignment popup.
+    """
+    result = await db.execute(
+        select(Meeting).where(
+            and_(
+                Meeting.id == meeting_id,
+                Meeting.team_id == current_user.team_id
+            )
+        ).options(selectinload(Meeting.action_items))
+    )
+    meeting = result.scalar_one_or_none()
+    if not meeting:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Meeting not found")
+
+    import json
+    speaker_names: dict = {}
+    if meeting.speaker_names:
+        try:
+            speaker_names = json.loads(meeting.speaker_names)
+        except Exception:
+            pass
+
+    # Fetch team members for suggestions
+    members_result = await db.execute(
+        select(User).where(
+            and_(User.team_id == current_user.team_id, User.is_active == True)
+        )
+    )
+    members = members_result.scalars().all()
+    member_list = [{"id": str(m.id), "full_name": m.full_name, "email": m.email} for m in members]
+
+    pending = [ai for ai in meeting.action_items if ai.status.value == "pending"]
+    items = []
+    for ai in pending:
+        # Suggest an assignee based on assignee_mentioned or speaker_label mapping
+        suggested_id = None
+        candidate = None
+        if ai.assignee_mentioned:
+            candidate = ai.assignee_mentioned.strip().lower()
+        elif ai.speaker_label and ai.speaker_label in speaker_names:
+            candidate = speaker_names[ai.speaker_label].strip().lower()
+
+        if candidate:
+            for m in members:
+                if candidate in m.full_name.lower() or candidate in m.email.lower():
+                    suggested_id = str(m.id)
+                    break
+
+        items.append({
+            "id": str(ai.id),
+            "description": ai.description,
+            "assignee_mentioned": ai.assignee_mentioned,
+            "speaker_label": ai.speaker_label,
+            "speaker_display_name": speaker_names.get(ai.speaker_label or "", ai.speaker_label or ""),
+            "deadline_mentioned": ai.deadline_mentioned.isoformat() if ai.deadline_mentioned else None,
+            "confidence_score": ai.confidence_score,
+            "suggested_assignee_id": suggested_id,
+        })
+
+    return {
+        "meeting_id": meeting_id,
+        "meeting_title": meeting.title,
+        "pending_items": items,
+        "team_members": member_list,
+    }
+
+
+@router.post("/{meeting_id}/bulk-assign", status_code=status.HTTP_200_OK)
+async def bulk_assign_action_items(
+    meeting_id: str,
+    body: dict,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    Convert multiple action items to tasks with explicit assignees.
+
+    Body: {"assignments": [{"action_item_id": "...", "assignee_id": "..."}]}
+    """
+    from app.models import Task, TaskStatus, TaskPriority, TaskSourceType
+
+    result = await db.execute(
+        select(Meeting).where(
+            and_(
+                Meeting.id == meeting_id,
+                Meeting.team_id == current_user.team_id
+            )
+        ).options(selectinload(Meeting.action_items))
+    )
+    meeting = result.scalar_one_or_none()
+    if not meeting:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Meeting not found")
+
+    assignments = body.get("assignments", [])
+    created = []
+
+    for assignment in assignments:
+        action_item_id = assignment.get("action_item_id")
+        assignee_id = assignment.get("assignee_id")
+
+        action_item = next((ai for ai in meeting.action_items if str(ai.id) == action_item_id), None)
+        if not action_item or action_item.status.value == "converted":
+            continue
+
+        new_task = Task(
+            title=action_item.description[:500],
+            description=action_item.description,
+            status=TaskStatus.TODO,
+            priority=TaskPriority.MEDIUM,
+            due_date=action_item.deadline_mentioned,
+            team_id=current_user.team_id,
+            created_by_id=current_user.id,
+            assignee_id=assignee_id or None,
+            source_type=TaskSourceType.MEETING,
+            source_id=meeting_id,
+        )
+        db.add(new_task)
+        await db.flush()
+
+        action_item.status = "converted"
+        action_item.task_id = new_task.id
+        created.append(str(new_task.id))
+
+    await db.commit()
+
+    # Fire Slack notifications for each created task
+    if created:
+        try:
+            from app.tasks.integration_tasks import notify_slack_task_created
+            for task_id in created:
+                notify_slack_task_created.delay(task_id, str(current_user.id))
+        except Exception:
+            pass  # Notifications are best-effort
+
+    return {"created_task_ids": created, "count": len(created)}
 
 
 @router.get("/{meeting_id}/export", response_class=PlainTextResponse)

@@ -317,6 +317,73 @@ Return ONLY a JSON object with these fields:
         return {"confidence": 0.0}
 
 
+async def extract_task_from_email(subject: str, sender: str, body: str) -> Dict[str, Any]:
+    """
+    Analyze an email and extract a task if one is present.
+
+    Returns a dict with:
+      has_task: bool
+      title: str
+      description: str
+      priority: "low" | "medium" | "high" | "urgent"
+      due_date: "YYYY-MM-DD" or null
+    """
+    try:
+        client, model = _get_chat_client()
+
+        prompt = f"""You are an AI assistant that reads emails and determines whether they contain an actionable task that should be added to a task management system.
+
+Analyze this email carefully:
+
+Subject: {subject}
+From: {sender}
+Body:
+{body[:2000]}
+
+Decide: does this email ask the recipient to DO something specific (i.e. contains a task, request, action item, or deadline)?
+
+If YES, extract the task. If NO (e.g. it's just an FYI, newsletter, invoice, or general update with no action needed), set has_task to false.
+
+Return ONLY a valid JSON object, no other text:
+{{
+  "has_task": true,
+  "title": "Short task title (max 100 chars)",
+  "description": "Full task description including context from the email",
+  "priority": "low|medium|high|urgent",
+  "due_date": "YYYY-MM-DD or null"
+}}
+
+Or if no task:
+{{"has_task": false}}"""
+
+        response = await client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "system", "content": "You extract actionable tasks from emails. Return only valid JSON."},
+                {"role": "user", "content": prompt},
+            ],
+            temperature=0.1,
+            max_tokens=300,
+        )
+
+        result_text = response.choices[0].message.content.strip()
+
+        # Strip markdown code fences if present
+        if result_text.startswith("```"):
+            result_text = result_text.split("```")[1]
+            if result_text.startswith("json"):
+                result_text = result_text[4:]
+
+        result = json.loads(result_text)
+        if not isinstance(result, dict):
+            return {"has_task": False}
+        return result
+
+    except Exception as e:
+        logger.warning(f"Email task extraction failed: {e}")
+        return {"has_task": False}
+
+
 async def chat_query(query: str, context: Dict[str, Any]) -> str:
     """Process a natural language query about tasks, meetings, or team info."""
     try:

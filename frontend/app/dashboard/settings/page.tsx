@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, useEffect } from 'react'
+import { useState, useEffect, Suspense } from 'react'
 import { useSearchParams } from 'next/navigation'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { authApi, integrationsApi, emailApi, adminApi } from '@/lib/api'
@@ -27,7 +27,7 @@ const ROLE_OPTIONS: { value: UserRole; label: string }[] = [
   { value: 'intern', label: 'Intern' },
 ]
 
-export default function SettingsPage() {
+function SettingsPageContent() {
   const queryClient = useQueryClient()
   const searchParams = useSearchParams()
   const { user, fetchUser } = useAuthStore()
@@ -1136,5 +1136,13 @@ export default function SettingsPage() {
         </CardContent>
       </Card>
     </div>
+  )
+}
+
+export default function SettingsPage() {
+  return (
+    <Suspense fallback={<div className="flex items-center justify-center py-12"><div className="h-8 w-8 animate-spin rounded-full border-4 border-primary border-t-transparent" /></div>}>
+      <SettingsPageContent />
+    </Suspense>
   )
 }

@@ -20,8 +20,8 @@ def upgrade() -> None:
     dialect = bind.dialect.name
 
     if dialect == 'postgresql':
-        op.execute("ALTER TYPE integrationplatform ADD VALUE IF NOT EXISTS 'zoom'")
-        op.execute("ALTER TYPE meetingstatus ADD VALUE IF NOT EXISTS 'awaiting_upload'")
+        op.execute("ALTER TYPE integrationplatform ADD VALUE IF NOT EXISTS 'ZOOM'")
+        op.execute("ALTER TYPE meetingstatus ADD VALUE IF NOT EXISTS 'AWAITING_UPLOAD'")
 
     # Add zoom columns to meetings table
     with op.batch_alter_table('meetings', schema=None) as batch_op:

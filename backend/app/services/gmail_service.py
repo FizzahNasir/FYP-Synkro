@@ -199,3 +199,54 @@ def fetch_emails(
         raise
 
     return emails
+
+
+def delete_email_from_gmail(email_addr: str, app_password: str, gmail_message_id: str) -> bool:
+    """
+    Delete an email from Gmail by its Message-ID header.
+    Gmail moves the message to Trash on EXPUNGE.
+
+    Returns True if deleted, False if not found or on error.
+    """
+    app_password = app_password.replace(" ", "")
+    try:
+        mail = imaplib.IMAP4_SSL("imap.gmail.com")
+        mail.login(email_addr, app_password)
+
+        # Search across INBOX and All Mail so we find it regardless of folder
+        folders_to_try = ["INBOX", "[Gmail]/All Mail"]
+        deleted = False
+
+        for folder in folders_to_try:
+            try:
+                status, _ = mail.select(folder)
+                if status != "OK":
+                    continue
+
+                # Escape any quotes in the message-id
+                safe_id = gmail_message_id.replace('"', '\\"')
+                status, data = mail.search(None, f'HEADER Message-ID "{safe_id}"')
+                if status != "OK" or not data[0]:
+                    continue
+
+                msg_ids = data[0].split()
+                if not msg_ids:
+                    continue
+
+                for msg_id in msg_ids:
+                    mail.store(msg_id, "+FLAGS", "\\Deleted")
+                mail.expunge()
+                deleted = True
+                break
+            except Exception:
+                continue
+
+        mail.logout()
+        return deleted
+
+    except imaplib.IMAP4.error as e:
+        logger.error(f"IMAP error while deleting email: {e}")
+        return False
+    except Exception as e:
+        logger.error(f"Failed to delete email from Gmail: {e}")
+        return False

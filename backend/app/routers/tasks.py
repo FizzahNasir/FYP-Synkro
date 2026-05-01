@@ -8,10 +8,44 @@ from datetime import datetime
 
 from app.database import get_db
 from app.models import Task, User, TaskStatus, Integration, IntegrationPlatform
+from app.models.user import UserRole
 from app.schemas.task import TaskCreate, TaskUpdate, TaskResponse, TaskStats
 from app.dependencies import get_current_user
 
 router = APIRouter(prefix="/api/tasks", tags=["Tasks"])
+
+MANAGEMENT_ROLES = {UserRole.ADMIN}
+
+
+def _task_to_dict(task: Task) -> dict:
+    return {
+        "id": task.id,
+        "title": task.title,
+        "description": task.description,
+        "status": task.status.value,
+        "priority": task.priority.value,
+        "due_date": task.due_date,
+        "estimated_hours": task.estimated_hours,
+        "assignee_id": task.assignee_id,
+        "created_by_id": task.created_by_id,
+        "team_id": task.team_id,
+        "source_type": task.source_type.value,
+        "source_id": task.source_id,
+        "external_id": task.external_id,
+        "created_at": task.created_at,
+        "updated_at": task.updated_at,
+        "assignee": {
+            "id": task.assignee.id,
+            "full_name": task.assignee.full_name,
+            "email": task.assignee.email,
+            "avatar_url": task.assignee.avatar_url,
+        } if task.assignee else None,
+        "creator": {
+            "id": task.creator.id,
+            "full_name": task.creator.full_name,
+            "email": task.creator.email,
+        } if task.creator else None,
+    }
 
 
 @router.get("", response_model=List[TaskResponse])
@@ -21,7 +55,7 @@ async def get_tasks(
     assignee_id: Optional[str] = None,
     due_before: Optional[datetime] = None,
     due_after: Optional[datetime] = None,
-    limit: int = Query(default=20, le=100),
+    limit: int = Query(default=20, le=200),
     offset: int = Query(default=0, ge=0),
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db)
@@ -38,18 +72,26 @@ async def get_tasks(
     - **limit**: Maximum number of results (default 20, max 100)
     - **offset**: Number of results to skip for pagination
     """
+    is_manager = current_user.role in MANAGEMENT_ROLES
+
     # Build query - only show tasks from user's team
     query = select(Task).where(Task.team_id == current_user.team_id)
 
-    # Apply filters
+    # Non-management roles can only see tasks assigned to them
+    if not is_manager:
+        query = query.where(Task.assignee_id == current_user.id)
+    else:
+        # Managers can filter by assignee
+        if assignee_id == "unassigned":
+            query = query.where(Task.assignee_id == None)
+        elif assignee_id:
+            query = query.where(Task.assignee_id == assignee_id)
+
     if status:
         query = query.where(Task.status == status)
 
     if priority:
         query = query.where(Task.priority == priority)
-
-    if assignee_id:
-        query = query.where(Task.assignee_id == assignee_id)
 
     if due_before:
         query = query.where(Task.due_date <= due_before)
@@ -73,40 +115,7 @@ async def get_tasks(
     result = await db.execute(query)
     tasks = result.scalars().all()
 
-    # Convert to response model with nested objects
-    task_responses = []
-    for task in tasks:
-        task_dict = {
-            "id": task.id,
-            "title": task.title,
-            "description": task.description,
-            "status": task.status.value,
-            "priority": task.priority.value,
-            "due_date": task.due_date,
-            "estimated_hours": task.estimated_hours,
-            "assignee_id": task.assignee_id,
-            "created_by_id": task.created_by_id,
-            "team_id": task.team_id,
-            "source_type": task.source_type.value,
-            "source_id": task.source_id,
-            "external_id": task.external_id,
-            "created_at": task.created_at,
-            "updated_at": task.updated_at,
-            "assignee": {
-                "id": task.assignee.id,
-                "full_name": task.assignee.full_name,
-                "email": task.assignee.email,
-                "avatar_url": task.assignee.avatar_url
-            } if task.assignee else None,
-            "creator": {
-                "id": task.creator.id,
-                "full_name": task.creator.full_name,
-                "email": task.creator.email
-            } if task.creator else None
-        }
-        task_responses.append(task_dict)
-
-    return task_responses
+    return [_task_to_dict(t) for t in tasks]
 
 
 @router.post("", response_model=TaskResponse, status_code=status.HTTP_201_CREATED)
@@ -187,29 +196,43 @@ async def create_task(
         pass  # Don't fail task creation if background tasks can't be queued
 
     # Load relationships
-    await db.refresh(new_task, ["assignee", "creator"])
+    result = await db.execute(
+        select(Task).where(Task.id == new_task.id).options(
+            selectinload(Task.assignee),
+            selectinload(Task.creator)
+        )
+    )
+    new_task = result.scalar_one()
 
-    return new_task
+    return _task_to_dict(new_task)
 
 
 @router.get("/stats", response_model=TaskStats)
 async def get_task_stats(
+    assignee_id: Optional[str] = None,
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db)
 ):
     """
-    Get task statistics for the current user's team.
+    Get task statistics.
 
-    Returns counts by status, overdue count, and completion rate.
+    - Managers: team-wide stats by default; can filter by assignee_id.
+    - Others: always scoped to their own tasks only.
     """
+    is_manager = current_user.role in MANAGEMENT_ROLES
+    base_filter = [Task.team_id == current_user.team_id]
+
+    if not is_manager:
+        base_filter.append(Task.assignee_id == current_user.id)
+    elif assignee_id:
+        base_filter.append(Task.assignee_id == assignee_id)
+
     # Count tasks by status
     result = await db.execute(
         select(
             Task.status,
             func.count(Task.id).label("count")
-        ).where(
-            Task.team_id == current_user.team_id
-        ).group_by(Task.status)
+        ).where(and_(*base_filter)).group_by(Task.status)
     )
     status_counts = {row[0].value: row[1] for row in result}
 
@@ -217,7 +240,7 @@ async def get_task_stats(
     result = await db.execute(
         select(func.count(Task.id)).where(
             and_(
-                Task.team_id == current_user.team_id,
+                *base_filter,
                 Task.due_date < datetime.utcnow(),
                 Task.status != TaskStatus.DONE
             )
@@ -225,14 +248,11 @@ async def get_task_stats(
     )
     overdue_count = result.scalar() or 0
 
-    # Calculate totals
     total = sum(status_counts.values())
     todo = status_counts.get("todo", 0)
     in_progress = status_counts.get("in_progress", 0)
     done = status_counts.get("done", 0)
     blocked = status_counts.get("blocked", 0)
-
-    # Calculate completion rate
     completion_rate = (done / total * 100) if total > 0 else 0.0
 
     return {
@@ -257,13 +277,14 @@ async def get_task(
 
     Returns full task details with assignee and creator information.
     """
+    is_manager = current_user.role in MANAGEMENT_ROLES
+
+    conditions = [Task.id == task_id, Task.team_id == current_user.team_id]
+    if not is_manager:
+        conditions.append(Task.assignee_id == current_user.id)
+
     result = await db.execute(
-        select(Task).where(
-            and_(
-                Task.id == task_id,
-                Task.team_id == current_user.team_id
-            )
-        ).options(
+        select(Task).where(and_(*conditions)).options(
             selectinload(Task.assignee),
             selectinload(Task.creator)
         )
@@ -276,7 +297,7 @@ async def get_task(
             detail="Task not found"
         )
 
-    return task
+    return _task_to_dict(task)
 
 
 @router.patch("/{task_id}", response_model=TaskResponse)
@@ -291,22 +312,29 @@ async def update_task(
 
     Any field can be updated independently.
     Only provided fields will be updated.
+    Managers can update any team task; others can only update tasks assigned to them.
     """
+    is_manager = current_user.role in MANAGEMENT_ROLES
+
     # Get existing task
-    result = await db.execute(
-        select(Task).where(
-            and_(
-                Task.id == task_id,
-                Task.team_id == current_user.team_id
-            )
-        )
-    )
+    conditions = [Task.id == task_id, Task.team_id == current_user.team_id]
+    if not is_manager:
+        conditions.append(Task.assignee_id == current_user.id)
+
+    result = await db.execute(select(Task).where(and_(*conditions)))
     task = result.scalar_one_or_none()
 
     if not task:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Task not found"
+        )
+
+    # Non-managers cannot reassign tasks
+    if not is_manager and task_update.model_dump(exclude_unset=True).get("assignee_id") is not None:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only managers can reassign tasks"
         )
 
     # Validate assignee if being updated
@@ -408,9 +436,15 @@ async def update_task(
             pass
 
     # Load relationships
-    await db.refresh(task, ["assignee", "creator"])
+    result = await db.execute(
+        select(Task).where(Task.id == task.id).options(
+            selectinload(Task.assignee),
+            selectinload(Task.creator)
+        )
+    )
+    task = result.scalar_one()
 
-    return task
+    return _task_to_dict(task)
 
 
 @router.delete("/{task_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -420,10 +454,14 @@ async def delete_task(
     db: AsyncSession = Depends(get_db)
 ):
     """
-    Delete a task.
-
-    Only tasks from the user's team can be deleted.
+    Delete a task. Only admin can delete tasks.
     """
+    if current_user.role not in MANAGEMENT_ROLES:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only managers can delete tasks"
+        )
+
     result = await db.execute(
         select(Task).where(
             and_(
