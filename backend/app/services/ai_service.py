@@ -55,27 +55,33 @@ def _get_chat_client():
 
 async def transcribe_meeting(audio_file_path: str) -> str:
     """
-    Transcribe audio file using Whisper API (Groq free or OpenAI paid).
-
-    Args:
-        audio_file_path: Path to the audio file
+    Transcribe audio file using Whisper API.
 
     Returns:
-        Formatted transcript with timestamps
+        Formatted transcript string with timestamps.
+    """
+    text, _ = await transcribe_meeting_with_segments(audio_file_path)
+    return text
+
+
+async def transcribe_meeting_with_segments(audio_file_path: str):
+    """
+    Transcribe audio file using Whisper API (Groq free or OpenAI paid).
+
+    Returns:
+        (formatted_transcript: str, whisper_segments: list)
+        whisper_segments is a list of {"start", "end", "text"} dicts — empty list if unavailable.
     """
     try:
         client, model = _get_transcription_client()
 
-        # Check file size
         file_size = os.path.getsize(audio_file_path)
         max_size = 25 * 1024 * 1024  # 25MB
-
         if file_size > max_size:
             raise ValueError(f"File size {file_size} exceeds maximum of {max_size} bytes")
 
         logger.info(f"Transcribing with {model} via {'Groq' if client == groq_client else 'OpenAI'}")
 
-        # Open and transcribe file
         with open(audio_file_path, "rb") as audio_file:
             transcript = await client.audio.transcriptions.create(
                 model=model,
@@ -84,17 +90,32 @@ async def transcribe_meeting(audio_file_path: str) -> str:
                 language="en",
             )
 
-        # Format transcript with timestamps if available
-        if hasattr(transcript, 'segments') and transcript.segments:
-            formatted_transcript = ""
-            for segment in transcript.segments:
-                start_time = segment.get('start', 0) if isinstance(segment, dict) else getattr(segment, 'start', 0)
-                text = segment.get('text', '') if isinstance(segment, dict) else getattr(segment, 'text', '')
-                formatted_transcript += f"[{format_timestamp(start_time)}] {text}\n"
-            return formatted_transcript.strip()
+        raw_segments = getattr(transcript, 'segments', None) or []
 
-        # Fallback to plain text
-        return transcript.text
+        # Normalise to plain dicts
+        whisper_segments = []
+        for seg in raw_segments:
+            if isinstance(seg, dict):
+                whisper_segments.append({
+                    "start": seg.get("start", 0),
+                    "end": seg.get("end", 0),
+                    "text": seg.get("text", "").strip(),
+                })
+            else:
+                whisper_segments.append({
+                    "start": getattr(seg, "start", 0),
+                    "end": getattr(seg, "end", 0),
+                    "text": getattr(seg, "text", "").strip(),
+                })
+
+        if whisper_segments:
+            lines = [
+                f"[{format_timestamp(s['start'])}] {s['text']}"
+                for s in whisper_segments if s["text"]
+            ]
+            return "\n".join(lines), whisper_segments
+
+        return transcript.text, []
 
     except Exception as e:
         raise Exception(f"Transcription failed: {str(e)}")
@@ -294,6 +315,73 @@ Return ONLY a JSON object with these fields:
     except Exception as e:
         print(f"Entity extraction failed: {str(e)}")
         return {"confidence": 0.0}
+
+
+async def extract_task_from_email(subject: str, sender: str, body: str) -> Dict[str, Any]:
+    """
+    Analyze an email and extract a task if one is present.
+
+    Returns a dict with:
+      has_task: bool
+      title: str
+      description: str
+      priority: "low" | "medium" | "high" | "urgent"
+      due_date: "YYYY-MM-DD" or null
+    """
+    try:
+        client, model = _get_chat_client()
+
+        prompt = f"""You are an AI assistant that reads emails and determines whether they contain an actionable task that should be added to a task management system.
+
+Analyze this email carefully:
+
+Subject: {subject}
+From: {sender}
+Body:
+{body[:2000]}
+
+Decide: does this email ask the recipient to DO something specific (i.e. contains a task, request, action item, or deadline)?
+
+If YES, extract the task. If NO (e.g. it's just an FYI, newsletter, invoice, or general update with no action needed), set has_task to false.
+
+Return ONLY a valid JSON object, no other text:
+{{
+  "has_task": true,
+  "title": "Short task title (max 100 chars)",
+  "description": "Full task description including context from the email",
+  "priority": "low|medium|high|urgent",
+  "due_date": "YYYY-MM-DD or null"
+}}
+
+Or if no task:
+{{"has_task": false}}"""
+
+        response = await client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "system", "content": "You extract actionable tasks from emails. Return only valid JSON."},
+                {"role": "user", "content": prompt},
+            ],
+            temperature=0.1,
+            max_tokens=300,
+        )
+
+        result_text = response.choices[0].message.content.strip()
+
+        # Strip markdown code fences if present
+        if result_text.startswith("```"):
+            result_text = result_text.split("```")[1]
+            if result_text.startswith("json"):
+                result_text = result_text[4:]
+
+        result = json.loads(result_text)
+        if not isinstance(result, dict):
+            return {"has_task": False}
+        return result
+
+    except Exception as e:
+        logger.warning(f"Email task extraction failed: {e}")
+        return {"has_task": False}
 
 
 async def chat_query(query: str, context: Dict[str, Any]) -> str:

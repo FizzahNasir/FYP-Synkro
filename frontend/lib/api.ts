@@ -115,6 +115,8 @@ export const authApi = {
   getRoles: () => api.get('/api/auth/roles'),
 
   checkAdminExists: () => api.get('/api/auth/admin-exists'),
+
+  getTeamMembers: () => api.get('/api/auth/me/team-members'),
 }
 
 // Admin API
@@ -139,7 +141,7 @@ export const taskApi = {
   createTask: (data: Record<string, any>) => api.post('/api/tasks', data),
   updateTask: (id: string, data: Record<string, any>) => api.patch(`/api/tasks/${id}`, data),
   deleteTask: (id: string) => api.delete(`/api/tasks/${id}`),
-  getStats: () => api.get('/api/tasks/stats'),
+  getStats: (params?: { assignee_id?: string }) => api.get('/api/tasks/stats', { params }),
 }
 
 // Meeting API
@@ -151,11 +153,23 @@ export const meetingApi = {
       headers: { 'Content-Type': 'multipart/form-data' },
     }),
   retryMeeting: (id: string) => api.post(`/api/meetings/${id}/retry`),
+  uploadToMeeting: (id: string, formData: FormData) =>
+    api.post(`/api/meetings/${id}/upload`, formData, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+    }),
   deleteMeeting: (id: string) => api.delete(`/api/meetings/${id}`),
   convertActionItem: (meetingId: string, actionItemId: string) =>
     api.post(`/api/meetings/${meetingId}/action-items/${actionItemId}/convert`),
   rejectActionItem: (meetingId: string, actionItemId: string) =>
     api.post(`/api/meetings/${meetingId}/action-items/${actionItemId}/reject`),
+  updateSpeakerNames: (meetingId: string, speakerNames: Record<string, string>) =>
+    api.patch(`/api/meetings/${meetingId}/speaker-names`, { speaker_names: speakerNames }),
+  exportTranscript: (meetingId: string, format: 'txt' | 'summary' = 'txt') =>
+    api.get(`/api/meetings/${meetingId}/export`, { params: { format }, responseType: 'blob' }),
+  getPendingAssignments: (meetingId: string) =>
+    api.get(`/api/meetings/${meetingId}/pending-assignments`),
+  bulkAssignActionItems: (meetingId: string, assignments: { action_item_id: string; assignee_id: string | null }[]) =>
+    api.post(`/api/meetings/${meetingId}/bulk-assign`, { assignments }),
 }
 
 // Chat API
@@ -172,6 +186,7 @@ export const emailApi = {
     api.post('/api/emails/sync', null, { params }),
   getStats: () => api.get('/api/emails/stats'),
   seedDemo: () => api.post('/api/emails/seed-demo'),
+  deleteEmail: (id: string) => api.delete(`/api/emails/${id}`),
 }
 
 // Messages (Slack) API
@@ -195,6 +210,8 @@ export const integrationsApi = {
     api.post('/api/integrations/jira/connect', credentials),
   disconnectIntegration: (id: string) => api.delete(`/api/integrations/${id}`),
   syncIntegration: (id: string) => api.post(`/api/integrations/${id}/sync`),
+  startZoomOAuth: () => api.get('/api/integrations/zoom/start'),
+  testZoomConnection: () => api.get('/api/integrations/zoom/test'),
 }
 
 // Direct Messages API

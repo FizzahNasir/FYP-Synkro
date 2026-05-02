@@ -45,12 +45,13 @@ async def list_team_members(
     db: AsyncSession = Depends(get_db),
 ):
     """List all team members the current user can DM."""
-    result = await db.execute(
-        select(User).where(
-            User.id != current_user.id,
-            User.is_active == True,
-        )
+    query = select(User).where(
+        User.id != current_user.id,
+        User.is_active == True,
     )
+    if current_user.team_id:
+        query = query.where(User.team_id == current_user.team_id)
+    result = await db.execute(query)
     members = result.scalars().all()
     return [
         {

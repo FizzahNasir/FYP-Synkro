@@ -46,12 +46,13 @@ export default function SlackPage() {
   const [search, setSearch] = useState('')
   const [syncMsg, setSyncMsg] = useState('')
 
-  const { data: integrationsData } = useQuery<{ data: any[] }>({
+  const { data: integrationsData } = useQuery({
     queryKey: ['integrations'],
     queryFn: () => integrationsApi.getIntegrations(),
   })
 
-  const slackIntegration = (integrationsData?.data || []).find((i: any) => i.platform === 'slack')
+  const integrations: any[] = (integrationsData as any)?.data || []
+  const slackIntegration = integrations.find((i: any) => i.platform === 'slack')
 
   const syncMutation = useMutation({
     mutationFn: () => integrationsApi.syncIntegration(slackIntegration.id),

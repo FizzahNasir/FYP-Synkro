@@ -19,6 +19,7 @@ import {
   ChevronUp,
   X,
   Plus,
+  Trash2,
 } from 'lucide-react'
 import { formatRelativeTime } from '@/lib/utils'
 
@@ -92,6 +93,7 @@ export default function EmailsPage() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['emails'] })
       queryClient.invalidateQueries({ queryKey: ['email-stats'] })
+      queryClient.invalidateQueries({ queryKey: ['tasks'] })
     },
   })
 
@@ -99,6 +101,16 @@ export default function EmailsPage() {
   const seedMutation = useMutation({
     mutationFn: () => emailApi.seedDemo(),
     onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['emails'] })
+      queryClient.invalidateQueries({ queryKey: ['email-stats'] })
+    },
+  })
+
+  // Delete mutation
+  const deleteMutation = useMutation({
+    mutationFn: (id: string) => emailApi.deleteEmail(id),
+    onSuccess: (_, id) => {
+      if (expandedId === id) setExpandedId(null)
       queryClient.invalidateQueries({ queryKey: ['emails'] })
       queryClient.invalidateQueries({ queryKey: ['email-stats'] })
     },
@@ -148,6 +160,11 @@ export default function EmailsPage() {
       {syncMutation.isSuccess && (
         <div className="rounded-md bg-green-50 dark:bg-green-950 p-3 text-sm text-green-800 dark:text-green-400">
           {(syncMutation.data as any)?.data?.message || 'Sync complete!'}
+          {(syncMutation.data as any)?.data?.tasks_created > 0 && (
+            <span className="ml-1 font-medium">
+              Check your Tasks dashboard for newly extracted tasks.
+            </span>
+          )}
         </div>
       )}
 
@@ -235,26 +252,33 @@ export default function EmailsPage() {
               const isExpanded = expandedId === em.id
               const { name: senderName, email: senderEmail } = parseSender(em.sender)
 
+              const isDeleting = deleteMutation.isPending && (deleteMutation.variables === em.id)
+
               return (
                 <div key={em.id}>
                   {/* Email row */}
-                  <button
-                    onClick={() => setExpandedId(isExpanded ? null : em.id)}
+                  <div
                     className={`w-full text-left px-4 py-3 hover:bg-muted/50 transition-colors flex items-start gap-3 ${
                       !em.is_read ? 'bg-blue-50/50 dark:bg-blue-950/20' : ''
                     }`}
                   >
                     {/* Icon */}
-                    <div className="mt-0.5 shrink-0">
+                    <button
+                      onClick={() => setExpandedId(isExpanded ? null : em.id)}
+                      className="mt-0.5 shrink-0"
+                    >
                       {em.is_read ? (
                         <MailOpen className="h-4 w-4 text-muted-foreground" />
                       ) : (
                         <Mail className="h-4 w-4 text-blue-600" />
                       )}
-                    </div>
+                    </button>
 
                     {/* Content */}
-                    <div className="flex-1 min-w-0">
+                    <button
+                      onClick={() => setExpandedId(isExpanded ? null : em.id)}
+                      className="flex-1 min-w-0 text-left"
+                    >
                       <div className="flex items-center gap-2">
                         <span className={`text-sm truncate ${!em.is_read ? 'font-semibold' : 'font-medium'}`}>
                           {senderName || senderEmail}
@@ -272,20 +296,38 @@ export default function EmailsPage() {
                       <p className="text-xs text-muted-foreground truncate mt-0.5">
                         {em.body_preview}
                       </p>
-                    </div>
+                    </button>
 
-                    {/* Date + expand */}
+                    {/* Date + expand + delete */}
                     <div className="flex items-center gap-2 shrink-0">
-                      <span className="text-xs text-muted-foreground whitespace-nowrap">
-                        {em.received_at ? formatRelativeTime(em.received_at) : ''}
-                      </span>
-                      {isExpanded ? (
-                        <ChevronUp className="h-4 w-4 text-muted-foreground" />
-                      ) : (
-                        <ChevronDown className="h-4 w-4 text-muted-foreground" />
-                      )}
+                      <button onClick={() => setExpandedId(isExpanded ? null : em.id)} className="flex items-center gap-1">
+                        <span className="text-xs text-muted-foreground whitespace-nowrap">
+                          {em.received_at ? formatRelativeTime(em.received_at) : ''}
+                        </span>
+                        {isExpanded ? (
+                          <ChevronUp className="h-4 w-4 text-muted-foreground" />
+                        ) : (
+                          <ChevronDown className="h-4 w-4 text-muted-foreground" />
+                        )}
+                      </button>
+                      <button
+                        onClick={() => {
+                          if (confirm('Delete this email? It will also be removed from Gmail.')) {
+                            deleteMutation.mutate(em.id)
+                          }
+                        }}
+                        disabled={isDeleting}
+                        className="p-1 rounded hover:bg-red-100 dark:hover:bg-red-950 text-muted-foreground hover:text-red-600 transition-colors disabled:opacity-50"
+                        title="Delete email"
+                      >
+                        {isDeleting ? (
+                          <Loader2 className="h-4 w-4 animate-spin" />
+                        ) : (
+                          <Trash2 className="h-4 w-4" />
+                        )}
+                      </button>
                     </div>
-                  </button>
+                  </div>
 
                   {/* Expanded body */}
                   {isExpanded && (

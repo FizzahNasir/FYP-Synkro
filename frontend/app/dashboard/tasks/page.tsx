@@ -1,13 +1,13 @@
 'use client'
 
-import { useState } from 'react'
+import { useState, useMemo } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { taskApi, dmApi } from '@/lib/api'
 import { useAuthStore } from '@/lib/stores/authStore'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
-import { Badge } from '@/components/ui/badge'
 import { Card } from '@/components/ui/card'
+import { Badge } from '@/components/ui/badge'
 import { Label } from '@/components/ui/label'
 import { Textarea } from '@/components/ui/textarea'
 import {
@@ -17,7 +17,20 @@ import {
   DialogHeader,
   DialogTitle,
 } from '@/components/ui/dialog'
-import { Search, Filter, Pencil, Trash2, Bot, MessageSquare, Video, User } from 'lucide-react'
+import {
+  Search,
+  Filter,
+  Pencil,
+  Trash2,
+  Bot,
+  MessageSquare,
+  Video,
+  User,
+  AlertTriangle,
+  BarChart2,
+  CheckCircle2,
+  Clock,
+} from 'lucide-react'
 import { formatDueDate, getStatusColor, getPriorityColor, capitalize } from '@/lib/utils'
 import type { Task } from '@/types'
 import { CreateTaskDialog } from '@/components/create-task-dialog'
@@ -39,6 +52,81 @@ function SourceBadge({ type }: { type: string }) {
       <Icon className="h-3 w-3" />
       {cfg.label}
     </span>
+  )
+}
+
+// ── Work Balance Panel (admin only) ──────────────────────────────────────────
+
+interface WorkBalancePanelProps {
+  tasks: Task[]
+  members: { id: string; full_name: string; email: string }[]
+  onFilterByMember: (id: string) => void
+}
+
+function WorkBalancePanel({ tasks, members, onFilterByMember }: WorkBalancePanelProps) {
+  const now = new Date()
+
+  // Build per-member stats from tasks that have an assignee
+  const stats = useMemo(() => {
+    const map: Record<string, { name: string; total: number; done: number; overdue: number; upcoming: number }> = {}
+    for (const t of tasks) {
+      if (!t.assignee_id) continue
+      const name = t.assignee?.full_name ?? members.find((m) => m.id === t.assignee_id)?.full_name ?? 'Unknown'
+      if (!map[t.assignee_id]) map[t.assignee_id] = { name, total: 0, done: 0, overdue: 0, upcoming: 0 }
+      map[t.assignee_id].total++
+      if (t.status === 'done') map[t.assignee_id].done++
+      if (t.due_date && new Date(t.due_date) < now && t.status !== 'done') map[t.assignee_id].overdue++
+      if (t.due_date && new Date(t.due_date) >= now && t.status !== 'done') map[t.assignee_id].upcoming++
+    }
+    return Object.entries(map)
+      .map(([id, s]) => ({ id, ...s, active: s.total - s.done }))
+      .sort((a, b) => b.active - a.active)
+  }, [tasks, members])
+
+  if (stats.length === 0) return null
+
+  const maxActive = Math.max(...stats.map((s) => s.active), 1)
+
+  return (
+    <Card className="p-4 space-y-3">
+      <div className="flex items-center gap-2">
+        <BarChart2 className="h-4 w-4 text-muted-foreground" />
+        <h2 className="text-sm font-semibold">Team Work Balance</h2>
+        <span className="text-xs text-muted-foreground ml-auto">{tasks.length} tasks total</span>
+      </div>
+      <div className="space-y-2">
+        {stats.map((s) => (
+          <button
+            key={s.id}
+            className="w-full text-left group"
+            onClick={() => onFilterByMember(s.id)}
+            title={`Filter by ${s.name}`}
+          >
+            <div className="flex items-center justify-between mb-0.5">
+              <span className="text-xs font-medium group-hover:text-primary transition-colors truncate max-w-[160px]">
+                {s.name}
+              </span>
+              <div className="flex items-center gap-2 text-xs text-muted-foreground shrink-0 ml-2">
+                {s.overdue > 0 && (
+                  <span className="text-red-500 font-medium flex items-center gap-0.5">
+                    <AlertTriangle className="h-3 w-3" />
+                    {s.overdue} overdue
+                  </span>
+                )}
+                <span>{s.active} active</span>
+                <span className="text-green-600">{s.done} done</span>
+              </div>
+            </div>
+            <div className="h-1.5 rounded-full bg-muted overflow-hidden">
+              <div
+                className={`h-full rounded-full transition-all ${s.overdue > 0 ? 'bg-red-400' : 'bg-primary'}`}
+                style={{ width: `${(s.active / maxActive) * 100}%` }}
+              />
+            </div>
+          </button>
+        ))}
+      </div>
+    </Card>
   )
 }
 
@@ -159,7 +247,7 @@ function EditTaskDialog({ task, onClose }: EditTaskDialogProps) {
                 <select
                   id="edit-status"
                   value={status}
-                  onChange={(e) => setStatus(e.target.value)}
+                  onChange={(e) => setStatus(e.target.value as Task['status'])}
                   className="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                 >
                   <option value="todo">To Do</option>
@@ -174,7 +262,7 @@ function EditTaskDialog({ task, onClose }: EditTaskDialogProps) {
                 <select
                   id="edit-priority"
                   value={priority}
-                  onChange={(e) => setPriority(e.target.value)}
+                  onChange={(e) => setPriority(e.target.value as Task['priority'])}
                   className="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                 >
                   <option value="low">Low</option>
@@ -247,26 +335,54 @@ function EditTaskDialog({ task, onClose }: EditTaskDialogProps) {
 
 export default function TasksPage() {
   const queryClient = useQueryClient()
+  const { user: currentUser } = useAuthStore()
+  const isAdmin = currentUser?.role === 'admin'
+
   const [searchTerm, setSearchTerm] = useState('')
   const [statusFilter, setStatusFilter] = useState<string>('all')
   const [priorityFilter, setPriorityFilter] = useState<string>('all')
+  const [assigneeFilter, setAssigneeFilter] = useState<string>('all')
   const [editingTask, setEditingTask] = useState<Task | null>(null)
 
-  // Fetch tasks
+  // Team members for assignee filter (admins only)
+  const { data: teamMembers = [] } = useQuery<{ id: string; full_name: string; email: string }[]>({
+    queryKey: ['dm-users-for-tasks'],
+    queryFn: async () => (await dmApi.getUsers()).data,
+    staleTime: 60_000,
+    enabled: isAdmin,
+  })
+
+  const queryKey = ['tasks', statusFilter, priorityFilter, assigneeFilter]
+
+  // Fetch tasks — admins see all, non-admins only see their own
   const { data, isLoading } = useQuery<{ data: Task[] }>({
-    queryKey: ['tasks', statusFilter, priorityFilter],
+    queryKey,
     queryFn: () => {
-      const params: any = { limit: 100 }
+      const params: any = { limit: 200 }
       if (statusFilter !== 'all') params.status = statusFilter
       if (priorityFilter !== 'all') params.priority = priorityFilter
+      if (assigneeFilter !== 'all') params.assignee_id = assigneeFilter
+      // Non-admins always filter to their own tasks
+      if (!isAdmin && currentUser) params.assignee_id = currentUser.id
       return taskApi.getTasks(params)
     },
   })
 
-  // Delete mutation
+  // Delete mutation — optimistic: remove immediately, rollback on error
   const deleteMutation = useMutation({
     mutationFn: (id: string) => taskApi.deleteTask(id),
-    onSuccess: () => {
+    onMutate: async (id) => {
+      await queryClient.cancelQueries({ queryKey })
+      const previous = queryClient.getQueryData<{ data: Task[] }>(queryKey)
+      queryClient.setQueryData<{ data: Task[] }>(queryKey, (old) =>
+        old ? { ...old, data: old.data.filter((t) => t.id !== id) } : old
+      )
+      return { previous }
+    },
+    onError: (_err, _id, context: any) => {
+      if (context?.previous) queryClient.setQueryData(queryKey, context.previous)
+    },
+    onSettled: () => {
       queryClient.invalidateQueries({ queryKey: ['tasks'] })
       queryClient.invalidateQueries({ queryKey: ['task-stats'] })
     },
@@ -274,9 +390,29 @@ export default function TasksPage() {
 
   // Quick status update (cycle through all 4 statuses)
   const updateStatusMutation = useMutation({
-    mutationFn: ({ id, status }: { id: string; status: string }) =>
-      taskApi.updateTask(id, { status }),
-    onSuccess: () => {
+    mutationFn: ({ id, status, priority }: { id: string; status?: string; priority?: string }) =>
+      taskApi.updateTask(id, { ...(status !== undefined && { status }), ...(priority !== undefined && { priority }) }),
+    onMutate: async ({ id, status, priority }) => {
+      await queryClient.cancelQueries({ queryKey })
+      const previous = queryClient.getQueryData<{ data: Task[] }>(queryKey)
+      queryClient.setQueryData<{ data: Task[] }>(queryKey, (old) =>
+        old
+          ? {
+              ...old,
+              data: old.data.map((t) =>
+                t.id === id
+                  ? { ...t, ...(status !== undefined && { status: status as Task['status'] }), ...(priority !== undefined && { priority: priority as Task['priority'] }) }
+                  : t
+              ),
+            }
+          : old
+      )
+      return { previous }
+    },
+    onError: (_err, _vars, context: any) => {
+      if (context?.previous) queryClient.setQueryData(queryKey, context.previous)
+    },
+    onSettled: () => {
       queryClient.invalidateQueries({ queryKey: ['tasks'] })
       queryClient.invalidateQueries({ queryKey: ['task-stats'] })
     },
@@ -284,11 +420,17 @@ export default function TasksPage() {
 
   const tasks = data?.data || []
 
-  // Filter by search term (title + description)
+  // Filter by search term (title + description + assignee name)
   const filteredTasks = tasks.filter(
     (task) =>
       task.title.toLowerCase().includes(searchTerm.toLowerCase()) ||
-      (task.description ?? '').toLowerCase().includes(searchTerm.toLowerCase())
+      (task.description ?? '').toLowerCase().includes(searchTerm.toLowerCase()) ||
+      (task.assignee?.full_name ?? '').toLowerCase().includes(searchTerm.toLowerCase())
+  )
+
+  const now = new Date()
+  const overdueTasks = filteredTasks.filter(
+    (t) => t.due_date && new Date(t.due_date) < now && t.status !== 'done'
   )
 
   // Cycle status: todo → in_progress → done → todo
@@ -310,25 +452,48 @@ export default function TasksPage() {
   }
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-4">
       {/* Header */}
       <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
         <div className="min-w-0">
           <h1 className="text-xl sm:text-2xl font-bold">Tasks</h1>
-          <p className="text-sm text-muted-foreground">Manage and track your team's tasks</p>
+          <p className="text-sm text-muted-foreground">
+            {isAdmin ? "Manage and track your team's tasks" : 'Your assigned tasks'}
+          </p>
         </div>
-        <div className="shrink-0">
-          <CreateTaskDialog />
-        </div>
+        {isAdmin && (
+          <div className="shrink-0">
+            <CreateTaskDialog />
+          </div>
+        )}
       </div>
+
+      {/* Admin: work balance panel */}
+      {isAdmin && tasks.length > 0 && (
+        <WorkBalancePanel
+          tasks={tasks}
+          members={teamMembers}
+          onFilterByMember={(id) => setAssigneeFilter(id)}
+        />
+      )}
+
+      {/* Overdue alert */}
+      {overdueTasks.length > 0 && (
+        <div className="flex items-center gap-2 rounded-lg border border-red-200 bg-red-50 dark:bg-red-950 dark:border-red-800 px-4 py-2 text-sm text-red-700 dark:text-red-400">
+          <AlertTriangle className="h-4 w-4 shrink-0" />
+          <span>
+            <span className="font-semibold">{overdueTasks.length}</span> overdue task{overdueTasks.length !== 1 ? 's' : ''} — check deadlines below
+          </span>
+        </div>
+      )}
 
       {/* Filters */}
       <Card className="p-3 sm:p-4">
-        <div className="grid gap-3 grid-cols-1 sm:grid-cols-2 lg:grid-cols-4">
-          <div className="relative">
+        <div className="grid gap-3 grid-cols-1 sm:grid-cols-2 lg:grid-cols-5">
+          <div className="relative lg:col-span-2">
             <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
             <Input
-              placeholder="Search tasks..."
+              placeholder="Search tasks or assignee..."
               value={searchTerm}
               onChange={(e) => setSearchTerm(e.target.value)}
               className="pl-9"
@@ -359,11 +524,49 @@ export default function TasksPage() {
             <option value="urgent">Urgent</option>
           </select>
 
-          <div className="flex items-center text-sm text-muted-foreground">
-            <Filter className="h-4 w-4 mr-2" />
-            {filteredTasks.length} task{filteredTasks.length !== 1 ? 's' : ''}
-          </div>
+          {isAdmin ? (
+            <select
+              value={assigneeFilter}
+              onChange={(e) => setAssigneeFilter(e.target.value)}
+              className="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
+            >
+              <option value="all">All Members</option>
+              <option value="unassigned">Unassigned</option>
+              {teamMembers.map((m) => (
+                <option key={m.id} value={m.id}>
+                  {m.full_name}
+                </option>
+              ))}
+            </select>
+          ) : (
+            <div className="flex items-center text-sm text-muted-foreground">
+              <Filter className="h-4 w-4 mr-2" />
+              {filteredTasks.length} task{filteredTasks.length !== 1 ? 's' : ''}
+            </div>
+          )}
         </div>
+
+        {isAdmin && (
+          <div className="flex items-center justify-between mt-2 pt-2 border-t text-xs text-muted-foreground">
+            <span className="flex items-center gap-1">
+              <Filter className="h-3 w-3" />
+              {filteredTasks.length} task{filteredTasks.length !== 1 ? 's' : ''}
+              {assigneeFilter !== 'all' && assigneeFilter !== 'unassigned' && (
+                <span className="text-primary font-medium">
+                  — {teamMembers.find((m) => m.id === assigneeFilter)?.full_name}
+                </span>
+              )}
+            </span>
+            {assigneeFilter !== 'all' && (
+              <button
+                onClick={() => setAssigneeFilter('all')}
+                className="text-muted-foreground hover:text-foreground underline"
+              >
+                Clear filter
+              </button>
+            )}
+          </div>
+        )}
       </Card>
 
       {/* Tasks list */}
@@ -372,108 +575,129 @@ export default function TasksPage() {
       ) : filteredTasks.length === 0 ? (
         <Card className="p-12 text-center">
           <p className="text-muted-foreground mb-4">No tasks found</p>
-          <CreateTaskDialog />
+          {isAdmin && <CreateTaskDialog />}
         </Card>
       ) : (
-        <div className="overflow-y-auto max-h-[calc(100vh-280px)] pr-1 space-y-2 scrollbar-thin">
-          {filteredTasks.map((task) => (
-            <Card key={task.id} className="p-3 sm:p-4 hover:shadow-md transition-shadow">
-              <div className="flex items-start gap-2 sm:gap-3">
-                {/* Status cycle button */}
-                <button
-                  className={`mt-0.5 text-lg leading-none shrink-0 w-5 text-center transition-colors ${
-                    task.status === 'done'
-                      ? 'text-green-500'
-                      : task.status === 'in_progress'
-                      ? 'text-blue-500'
-                      : task.status === 'blocked'
-                      ? 'text-red-500'
-                      : 'text-gray-400'
-                  }`}
-                  title={`Status: ${task.status} — click to advance`}
-                  onClick={() => cycleStatus(task)}
-                  disabled={updateStatusMutation.isPending}
-                >
-                  {STATUS_ICON[task.status] ?? '○'}
-                </button>
+        <div className="overflow-y-auto max-h-[calc(100vh-380px)] pr-1 space-y-2 scrollbar-thin">
+          {filteredTasks.map((task) => {
+            const isOverdue = task.due_date && new Date(task.due_date) < now && task.status !== 'done'
+            return (
+              <Card
+                key={task.id}
+                className={`p-3 sm:p-4 hover:shadow-md transition-shadow ${isOverdue ? 'border-red-200 dark:border-red-800' : ''}`}
+              >
+                <div className="flex items-start gap-2 sm:gap-3">
+                  {/* Status cycle button */}
+                  <button
+                    className={`mt-0.5 text-lg leading-none shrink-0 w-5 text-center transition-colors ${
+                      task.status === 'done'
+                        ? 'text-green-500'
+                        : task.status === 'in_progress'
+                        ? 'text-blue-500'
+                        : task.status === 'blocked'
+                        ? 'text-red-500'
+                        : 'text-gray-400'
+                    }`}
+                    title={`Status: ${task.status} — click to advance`}
+                    onClick={() => cycleStatus(task)}
+                    disabled={updateStatusMutation.isPending}
+                  >
+                    {STATUS_ICON[task.status] ?? '○'}
+                  </button>
 
-                {/* Task content */}
-                <div className="flex-1 min-w-0">
-                  {/* Title row: title + badges + actions on one line (wraps on xs) */}
-                  <div className="flex flex-wrap items-start gap-x-2 gap-y-1 mb-1">
-                    <h3
-                      className={`font-medium leading-snug flex-1 min-w-0 break-words ${
-                        task.status === 'done' ? 'line-through text-muted-foreground' : ''
-                      }`}
-                    >
-                      {task.title}
-                    </h3>
-                    <div className="flex items-center gap-1 flex-shrink-0">
-                      <Badge className={`${getStatusColor(task.status)} text-xs px-1.5 py-0`}>
-                        {capitalize(task.status.replace('_', ' '))}
-                      </Badge>
-                      <Badge className={`${getPriorityColor(task.priority)} text-xs px-1.5 py-0`}>
-                        {capitalize(task.priority)}
-                      </Badge>
-                      {/* Actions inline on mobile too */}
-                      <Button
-                        size="sm"
-                        variant="ghost"
-                        className="h-7 w-7 p-0"
-                        title="Edit task"
-                        onClick={() => setEditingTask(task)}
+                  {/* Task content */}
+                  <div className="flex-1 min-w-0">
+                    {/* Title row */}
+                    <div className="flex flex-wrap items-start gap-x-2 gap-y-1 mb-1">
+                      <h3
+                        className={`font-medium leading-snug flex-1 min-w-0 break-words ${
+                          task.status === 'done' ? 'line-through text-muted-foreground' : ''
+                        }`}
                       >
-                        <Pencil className="h-3.5 w-3.5" />
-                      </Button>
-                      <Button
-                        size="sm"
-                        variant="ghost"
-                        className="h-7 w-7 p-0 text-red-500 hover:text-red-700 hover:bg-red-50"
-                        title="Delete task"
-                        onClick={() => {
-                          if (confirm('Delete this task?')) deleteMutation.mutate(task.id)
-                        }}
-                        disabled={deleteMutation.isPending}
-                      >
-                        <Trash2 className="h-3.5 w-3.5" />
-                      </Button>
+                        {task.title}
+                      </h3>
+                      <div className="flex items-center gap-1 flex-shrink-0">
+                        <Badge className={`${getStatusColor(task.status)} text-xs px-1.5 py-0`}>
+                          {capitalize(task.status.replace('_', ' '))}
+                        </Badge>
+                        <Badge className={`${getPriorityColor(task.priority)} text-xs px-1.5 py-0`}>
+                          {capitalize(task.priority)}
+                        </Badge>
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          className="h-7 w-7 p-0"
+                          title="Edit task"
+                          onClick={() => setEditingTask(task)}
+                        >
+                          <Pencil className="h-3.5 w-3.5" />
+                        </Button>
+                        {isAdmin && (
+                          <Button
+                            size="sm"
+                            variant="ghost"
+                            className="h-7 w-7 p-0 text-red-500 hover:text-red-700 hover:bg-red-50"
+                            title="Delete task"
+                            onClick={() => {
+                              if (confirm('Delete this task?')) deleteMutation.mutate(task.id)
+                            }}
+                            disabled={deleteMutation.isPending}
+                          >
+                            <Trash2 className="h-3.5 w-3.5" />
+                          </Button>
+                        )}
+                      </div>
+                    </div>
+
+                    {task.description && (
+                      <p className="text-sm text-muted-foreground mb-2 line-clamp-2">
+                        {task.description}
+                      </p>
+                    )}
+
+                    {/* Assignee chip — prominent for admins */}
+                    {task.assignee && (
+                      <div className="mb-2">
+                        <span className="inline-flex items-center gap-1.5 rounded-full bg-indigo-50 dark:bg-indigo-950 border border-indigo-200 dark:border-indigo-800 px-2.5 py-0.5 text-xs font-medium text-indigo-700 dark:text-indigo-300">
+                          <User className="h-3 w-3" />
+                          {task.assignee.full_name}
+                        </span>
+                      </div>
+                    )}
+                    {!task.assignee && isAdmin && (
+                      <div className="mb-2">
+                        <span className="inline-flex items-center gap-1.5 rounded-full bg-amber-50 dark:bg-amber-950 border border-amber-200 dark:border-amber-800 px-2.5 py-0.5 text-xs font-medium text-amber-700 dark:text-amber-300">
+                          <User className="h-3 w-3" />
+                          Unassigned
+                        </span>
+                      </div>
+                    )}
+
+                    <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted-foreground">
+                      <SourceBadge type={task.source_type} />
+                      {task.due_date && (
+                        <span className={`flex items-center gap-1 ${isOverdue ? 'text-red-500 font-semibold' : ''}`}>
+                          {isOverdue ? (
+                            <AlertTriangle className="h-3 w-3" />
+                          ) : (
+                            <Clock className="h-3 w-3" />
+                          )}
+                          {isOverdue ? 'Overdue: ' : 'Due '}
+                          {formatDueDate(task.due_date)}
+                        </span>
+                      )}
+                      {task.estimated_hours != null && (
+                        <span>{task.estimated_hours}h est.</span>
+                      )}
+                      {task.external_id && (
+                        <span className="text-blue-500 truncate max-w-[100px]">Jira: {task.external_id}</span>
+                      )}
                     </div>
                   </div>
-
-                  {task.description && (
-                    <p className="text-sm text-muted-foreground mb-2 line-clamp-2">
-                      {task.description}
-                    </p>
-                  )}
-
-                  <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted-foreground">
-                    <SourceBadge type={task.source_type} />
-                    {task.assignee && (
-                      <span className="flex items-center gap-1">
-                        <User className="h-3 w-3" />
-                        <span className="truncate max-w-[120px]">{task.assignee.full_name}</span>
-                      </span>
-                    )}
-                    {task.due_date && (
-                      <span className={
-                        new Date(task.due_date) < new Date() && task.status !== 'done'
-                          ? 'text-red-500 font-medium'
-                          : ''
-                      }>
-                        Due {formatDueDate(task.due_date)}
-                      </span>
-                    )}
-                    {task.estimated_hours != null && (
-                      <span>{task.estimated_hours}h est.</span>
-                    )}
-                    {task.external_id && (
-                      <span className="text-blue-500 truncate max-w-[100px]">Jira: {task.external_id}</span>
-                    )}
-                  </div>
                 </div>
-              </div>
-            </Card>
-          ))}
+              </Card>
+            )
+          })}
         </div>
       )}
 
