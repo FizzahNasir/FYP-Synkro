@@ -1,12 +1,5 @@
 # SYNKRO — Diagram Source Codes (Mermaid)
 
-**Instructions:**
-1. Rendered PNG exports are stored in `C:\Users\yasha\Desktop\SYNKRO_Diagrams\` — images are embedded below each diagram using that path.
-2. To re-render, paste the Mermaid code block into https://mermaid.live, export as PNG/SVG, and replace the file.
-3. All diagram titles correspond to figure numbers in SYNKRO_FYP_REPORT.md.
-
----
-
 ## Section 1 — Overall Use Case Diagram (Figure 1)
 
 > Insert at: Chapter 2, Section 2.6
@@ -1649,5 +1642,3 @@ erDiagram
 
 ---
 
-*End of SYNKRO_DIAGRAMS.md*
-*Mermaid source can be re-rendered at https://mermaid.live — paste, export as PNG/SVG, replace the file in `C:\Users\yasha\Desktop\SYNKRO_Diagrams\`.*
